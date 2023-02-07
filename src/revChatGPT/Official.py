@@ -10,6 +10,32 @@ from datetime import date
 import openai
 import tiktoken
 
+import logging
+
+from telegram import __version__ as TG_VER
+
+try:
+    from telegram import __version_info__
+except ImportError:
+    __version_info__ = (0, 0, 0, 0, 0)  # type: ignore[assignment]
+
+if __version_info__ < (20, 0, 0, "alpha", 1):
+    raise RuntimeError(
+        f"This example is not compatible with your current PTB version {TG_VER}. To view the "
+        f"{TG_VER} version of this example, "
+        f"visit https://docs.python-telegram-bot.org/en/v{TG_VER}/examples.html"
+    )
+from telegram import ForceReply, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+
 ENGINE = os.environ.get("GPT_ENGINE") or "text-chat-davinci-002-20221122"
 
 ENCODER = tiktoken.get_encoding("gpt2")
@@ -383,46 +409,16 @@ class Conversation:
             self.conversations = json.loads(f.read())
 
 
+
+
 def main():
-    print(
-        """
-    ChatGPT - A command-line interface to OpenAI's ChatGPT (https://chat.openai.com/chat)
-    Repo: github.com/acheong08/ChatGPT
-    """,
-    )
-    print("Type '!help' to show a full list of commands")
-    print("Press enter twice to submit your question.\n")
-
-    def get_input(prompt):
-        """
-        Multi-line input function
-        """
-        # Display the prompt
-        print(prompt, end="")
-
-        # Initialize an empty list to store the input lines
-        lines = []
-
-        # Read lines of input until the user enters an empty line
-        while True:
-            line = input()
-            if line == "":
-                break
-            lines.append(line)
-
-        # Join the lines, separated by newlines, and store the result
-        user_input = "\n".join(lines)
-
-        # Return the input
-        return user_input
 
     def chatbot_commands(cmd: str) -> bool:
         """
         Handle chatbot commands
         """
         if cmd == "!help":
-            print(
-                """
+            return """
             !help - Display this message
             !rollback - Rollback chat history
             !reset - Reset chat history
@@ -432,8 +428,8 @@ def main():
             !save_f <file_name> - Save all conversations to a file
             !load_f <file_name> - Load all conversations from a file
             !exit - Quit chat
-            """,
-            )
+            """
+            
         elif cmd == "!exit":
             exit()
         elif cmd == "!rollback":
@@ -441,7 +437,7 @@ def main():
         elif cmd == "!reset":
             chatbot.reset()
         elif cmd == "!prompt":
-            print(chatbot.prompt.construct_prompt(""))
+            return (chatbot.prompt.construct_prompt(""))
         elif cmd.startswith("!save_c"):
             chatbot.save_conversation(cmd.split(" ")[1])
         elif cmd.startswith("!load_c"):
@@ -451,16 +447,50 @@ def main():
         elif cmd.startswith("!load_f"):
             chatbot.conversations.load(cmd.split(" ")[1])
         else:
-            return False
-        return True
+            return "Wrong command"
+        return "Done"
+
+
+    # Define a few command handlers. These usually take the two arguments update and
+    # context.
+    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send a message when the command /start is issued."""
+        user = update.effective_user
+        await update.message.reply_text( chatbot_commands("!help") )
+
+
+    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        response = chatbot_commands("!help")
+
+        """Send a message when the command /help is issued."""
+        await update.message.reply_text(response)
+
+
+    async def talk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        response = ""
+        prompt = update.message.text
+        
+        if prompt.startswith("!"):
+            response = chatbot_commands(prompt)
+        else:
+            for ret in chatbot.ask_stream(prompt, temperature=args.temperature):
+                response = response + ret
+        await update.message.reply_text(response)
+
 
     # Get API key from command line
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--api_key",
+        "--openai_api_key",
         type=str,
         required=True,
         help="OpenAI API key",
+    )
+    parser.add_argument(
+        "--bot_token",
+        type=str,
+        required=True,
+        help="telegram Bot Token",
     )
     parser.add_argument(
         "--stream",
@@ -475,27 +505,22 @@ def main():
     )
     args = parser.parse_args()
     # Initialize chatbot
-    chatbot = Chatbot(api_key=args.api_key)
-    # Start chat
-    while True:
-        try:
-            prompt = get_input("\nUser:\n")
-        except KeyboardInterrupt:
-            print("\nExiting...")
-            sys.exit()
-        if prompt.startswith("!"):
-            if chatbot_commands(prompt):
-                continue
-        if not args.stream:
-            response = chatbot.ask(prompt, temperature=args.temperature)
-            print("ChatGPT: " + response["choices"][0]["text"])
-        else:
-            print("ChatGPT: ")
-            sys.stdout.flush()
-            for response in chatbot.ask_stream(prompt, temperature=args.temperature):
-                print(response, end="")
-                sys.stdout.flush()
-            print()
+    chatbot = Chatbot(api_key=args.openai_api_key)
+
+    """Start the bot."""
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(args.bot_token).build()
+
+    # on different commands - answer in Telegram
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+
+    # on non command i.e message - echo the message on Telegram
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, talk))
+
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling()
+
 
 
 if __name__ == "__main__":
